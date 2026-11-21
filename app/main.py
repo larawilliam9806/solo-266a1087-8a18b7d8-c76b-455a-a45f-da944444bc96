@@ -90,26 +90,45 @@ def upload():
         return redirect(url_for("index"))
 
     try:
-        definition, warnings, rows, _, _ = importer.parse(
+        definition, warnings, rows, groups, _, _ = importer.parse(
             csv_file.read(), json_file.read())
     except (importer.ImportError_, engine.DefinitionError) as error:
         flash("导入失败：%s" % error, "error")
         return redirect(url_for("index"))
 
-    answers = importer.to_import_answers(definition, rows)
+    household_answers = importer.to_row_answers(definition, rows)
+    households = [{
+        "household_no": row["household_no"],
+        "row_number": row["row_number"],
+        "answers": household_answers[(row["row_number"],
+                                      row["household_no"])],
+    } for row in rows]
+
+    pending = []
+    for group in groups:
+        pending.append({
+            "original_no": group["original_no"],
+            "rows": [{
+                "row_number": row["row_number"],
+                "answers": engine.import_row(definition, row["answers"])[1],
+            } for row in group["rows"]],
+        })
+
     name = request.form.get("batch_name", "").strip() or \
         os.path.splitext(os.path.basename(csv_file.filename))[0]
 
     connection = get_db()
     try:
-        batch_id = storage.create_batch(
-            connection, name, definition,
-            [(row["household_no"], row["row_number"]) for row in rows],
-            answers)
+        batch_id = storage.create_batch_with_pending(
+            connection, name, definition, households, pending)
     finally:
         connection.close()
 
-    flash("已导入 %d 户，%d 道题" % (len(rows), len(definition)), "success")
+    message = "已导入 %d 户，%d 道题" % (len(households), len(definition))
+    if pending:
+        message += "；%d 组重号（%d 行）待核定" % (
+            len(pending), sum(len(group["rows"]) for group in pending))
+    flash(message, "success")
     if warnings:
         flash("；".join(dict.fromkeys(warnings)), "warning")
     return redirect(url_for("batch", batch_id=batch_id))
@@ -121,6 +140,7 @@ def batch(batch_id):
     info = load_batch_or_404(connection, batch_id)
     definition = info["definition"]
     households = storage.list_households(connection, batch_id)
+    pending_groups = storage.list_pending_groups(connection, batch_id)
 
     summaries = []
     for household in households:
@@ -135,8 +155,125 @@ def batch(batch_id):
             "answered": sum(1 for step in steps if step["answered"]),
         })
     connection.close()
-    return render_template("batch.html", batch=info, households=summaries,
-                           question_count=len(definition))
+    return render_template(
+        "batch.html", batch=info, households=summaries,
+        question_count=len(definition),
+        pending_groups=[_group_summary(info["definition"], group)
+                        for group in pending_groups])
+
+
+def _group_summary(definition, group):
+    rows = []
+    for row in group["rows"]:
+        steps = engine.walk_stored(definition, row["answers"])
+        rows.append({
+            "id": row["id"],
+            "row_number": row["row_number"],
+            "decision": row["decision"],
+            "verified_no": row["verified_no"],
+            "household_id": row["household_id"],
+            "route": engine.route(steps),
+            "answer_list": [(step["qid"], step["value"]) for step in steps
+                            if step["answered"]],
+            "missing": engine.first_missing(steps),
+            "answered": sum(1 for step in steps if step["answered"]),
+        })
+    return {
+        "id": group["id"],
+        "original_no": group["original_no"],
+        "status": group["status"],
+        "decided_at": group["decided_at"],
+        "rows": rows,
+    }
+
+
+@app.get("/batch/<int:batch_id>/pending/<int:group_id>")
+def pending_group(batch_id, group_id):
+    connection = get_db()
+    info = load_batch_or_404(connection, batch_id)
+    group = storage.get_pending_group(connection, batch_id, group_id)
+    if group is None:
+        connection.close()
+        abort(404)
+    summary = _group_summary(info["definition"], group)
+    taken = storage.accepted_numbers(connection, batch_id)
+    reserved = storage.pending_reserved_numbers(connection, batch_id, group_id)
+    connection.close()
+    return render_template(
+        "pending.html", batch=info, group=summary,
+        used_numbers=sorted(taken | reserved))
+
+
+@app.post("/batch/<int:batch_id>/pending/<int:group_id>")
+def decide_pending_group(batch_id, group_id):
+    connection = get_db()
+    info = load_batch_or_404(connection, batch_id)
+    group = storage.get_pending_group(connection, batch_id, group_id)
+    if group is None:
+        connection.close()
+        abort(404)
+
+    decisions = collect_decisions(group, request.form)
+    action = request.form.get("action", "save")
+    try:
+        if action == "accept":
+            storage.accept_pending_group(
+                connection, batch_id, group_id, decisions)
+        else:
+            storage.save_pending_decisions(connection, group_id, decisions)
+    except storage.GroupError as error:
+        connection.close()
+        flash("核定未生效：%s（该组仍待核，可继续修改）" % error, "error")
+        return redirect(url_for("pending_group", batch_id=batch_id,
+                                group_id=group_id))
+    except Exception as error:
+        connection.close()
+        app.logger.exception("pending group decision failed")
+        flash("核定未生效：%s（该组仍待核，可继续修改）" % error, "error")
+        return redirect(url_for("pending_group", batch_id=batch_id,
+                                group_id=group_id))
+    connection.close()
+
+    if action == "accept":
+        kept = sum(1 for decision, _ in decisions.values()
+                   if decision == "keep")
+        flash("重号组 %s 已核定：%d 行加入正式答卷" % (
+            group["original_no"], kept), "success")
+        return redirect(url_for("batch", batch_id=batch_id))
+    flash("重号组 %s 的决定已暂存，尚未生效" % group["original_no"], "success")
+    return redirect(url_for("pending_group", batch_id=batch_id,
+                            group_id=group_id))
+
+
+def collect_decisions(group, form):
+    """``{pending_row_id: (decision, verified_no)}`` from the review form."""
+    decisions = {}
+    for row in group["rows"]:
+        decision = form.get("row_%d_decision" % row["id"], "undecided")
+        if decision not in ("keep", "discard", "undecided"):
+            decision = "undecided"
+        verified_no = (form.get("row_%d_no" % row["id"], "") or "").strip()
+        decisions[row["id"]] = (decision, verified_no or None)
+    return decisions
+
+
+@app.get("/batch/<int:batch_id>/pending/<int:group_id>/row/<int:row_id>")
+def pending_row(batch_id, group_id, row_id):
+    connection = get_db()
+    info = load_batch_or_404(connection, batch_id)
+    group = storage.get_pending_group(connection, batch_id, group_id)
+    if group is None:
+        connection.close()
+        abort(404)
+    row = next((item for item in group["rows"] if item["id"] == row_id), None)
+    if row is None:
+        connection.close()
+        abort(404)
+    steps = engine.walk_stored(info["definition"], row["answers"])
+    connection.close()
+    return render_template(
+        "pending_row.html", batch=info, group=group, row=row, steps=steps,
+        missing=engine.first_missing(steps))
 
 
 @app.get("/batch/<int:batch_id>/household/<int:household_id>")

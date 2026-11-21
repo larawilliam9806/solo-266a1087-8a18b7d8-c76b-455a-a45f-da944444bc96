@@ -165,3 +165,8 @@ ol.questions { list-style: none; padding: 0; margin: 1rem 0; counter-reset: q; }
 }
 
 .warn { color: #8a4b0f; font-size: 0.85rem; margin-top: 0.4rem; }
+
+dl.answers { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.1rem 0.5rem; font-size: 0.88rem; }
+dl.answers dt { color: var(--muted); font-weight: 600; }
+dl.answers dd { margin: 0; }
+tr.unanswered { background: var(--warn-bg); }

@@ -1,0 +1,13 @@
+[
+  {"id": "Q1", "title": "设备来源", "type": "single",
+   "options": ["自购", "租赁"], "jumps": {"自购": "Q2", "租赁": "Q5"}},
+  {"id": "Q2", "title": "自购设备类型", "type": "single",
+   "options": ["喷药机", "割草机", "采摘平台"], "jumps": {"采摘平台": "Q7"}},
+  {"id": "Q3", "title": "自购台数", "type": "number"},
+  {"id": "Q4", "title": "是否享受购置补贴", "type": "single",
+   "options": ["有", "无"], "jumps": {"有": "Q7", "无": "Q7"}},
+  {"id": "Q5", "title": "租赁方式", "type": "single",
+   "options": ["按年整租", "按季短租"]},
+  {"id": "Q6", "title": "租赁台数", "type": "number"},
+  {"id": "Q7", "title": "年费用合计（元）", "type": "number"}
+]

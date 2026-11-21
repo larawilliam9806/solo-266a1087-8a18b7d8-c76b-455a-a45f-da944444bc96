@@ -16,12 +16,13 @@ def load():
         raw_csv = handle.read()
     with open(os.path.join(ROOT, "examples", "jumps.json"), "rb") as handle:
         raw_json = handle.read()
-    definition, warnings, rows, _, _ = importer.parse(raw_csv, raw_json)
-    return definition, warnings, rows
+    definition, warnings, rows, groups, _, _ = importer.parse(
+        raw_csv, raw_json)
+    return definition, warnings, rows, groups
 
 
 def main():
-    definition, warnings, rows = load()
+    definition, warnings, rows, groups = load()
     print("题目：")
     for question in definition:
         print("  %-3s %-8s %s  jumps=%s" % (
@@ -41,6 +42,14 @@ def main():
         print("  %-5s %-32s 首个漏答: %s" % (
             row["household_no"], " → ".join(engine.route(steps)),
             missing["qid"] if missing else "无"))
+
+    if groups:
+        print("\n重号待核：")
+        for group in groups:
+            print("  户号 %s（%d 行）：%s" % (
+                group["original_no"], len(group["rows"]),
+                "、".join("第 %d 行" % row["row_number"]
+                          for row in group["rows"])))
 
     print("\n示例 JSON：")
     print(json.dumps(

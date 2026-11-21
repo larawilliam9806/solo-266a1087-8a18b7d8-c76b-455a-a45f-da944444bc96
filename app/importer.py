@@ -96,10 +96,20 @@ def read_json(raw):
 
 
 def parse(raw_csv, raw_json, household_column=None):
-    """Parse uploads into ``(definition, warnings, rows)``.
+    """Parse uploads into ``(definition, warnings, rows, groups, pos, headers)``.
 
     ``rows`` is a list of ``{household_no, row_number, answers}`` where
-    ``answers`` maps question id to the cell text.
+    ``answers`` maps question id to the cell text; these become editable
+    households immediately.
+
+    ``groups`` lists duplicated household numbers, one entry per number::
+
+        {"original_no": "H7",
+         "rows": [{"row_number": 3, "answers": {...}}, ...]}
+
+    Duplicates are only kept aside when the JSON is a complete questionnaire.
+    A bare jump table keeps the historical behaviour (first row wins, later
+    rows warn and are skipped) because it does not describe a full form.
     """
     rows = read_csv(raw_csv)
     headers = [_clean_header(h) for h in rows[0]]
@@ -115,6 +125,10 @@ def parse(raw_csv, raw_json, household_column=None):
         raise ImportError_("CSV 至少需要户号列和一个题目列")
 
     data = read_json(raw_json) if raw_json else None
+    # A complete questionnaire describes every CSV row, so duplicated numbers
+    # can be held back for review instead of silently dropped.
+    hold_duplicates = data is not None and \
+        engine.is_complete_questionnaire(data)
 
     # Question order and titles come from the JSON when it declares them.
     # A bare jump table leaves the order to the CSV columns.
@@ -144,6 +158,8 @@ def parse(raw_csv, raw_json, household_column=None):
         raise ImportError_("CSV 中没有能对应到题号的列")
 
     parsed_rows = []
+    group_rows = {}
+    group_order = []
     observed = {}
     seen = set()
     warnings = []
@@ -155,10 +171,6 @@ def parse(raw_csv, raw_json, household_column=None):
         if not household_no:
             warnings.append("CSV 第 %d 行缺少户号，已跳过" % (row_number + 1))
             continue
-        if household_no in seen:
-            warnings.append("户号 %s 重复出现，只保留第一次" % household_no)
-            continue
-        seen.add(household_no)
         answers = {}
         for position, qid in column_map.items():
             cell = (raw_row[position]
@@ -168,13 +180,44 @@ def parse(raw_csv, raw_json, household_column=None):
                 observed.setdefault(qid, [])
                 if cell not in observed[qid]:
                     observed[qid].append(cell)
+        if household_no in seen and hold_duplicates:
+            if household_no not in group_rows:
+                group_rows[household_no] = []
+                group_order.append(household_no)
+            group_rows[household_no].append({
+                "household_no": household_no,
+                "row_number": row_number,
+                "answers": answers,
+            })
+            continue
+        if household_no in seen:
+            warnings.append("户号 %s 重复出现，只保留第一次" % household_no)
+            continue
+        seen.add(household_no)
         parsed_rows.append({
             "household_no": household_no,
             "row_number": row_number,
             "answers": answers,
         })
 
-    if not parsed_rows:
+    groups = []
+    for household_no in group_order:
+        # The group's first occurrence stays in the waiting set too: the
+        # reviewer verifies every row of a duplicated number together.
+        first = next(row for row in parsed_rows
+                     if row["household_no"] == household_no)
+        parsed_rows.remove(first)
+        rows_in_group = [{"household_no": household_no,
+                          "row_number": first["row_number"],
+                          "answers": first["answers"]}]
+        rows_in_group.extend(group_rows[household_no])
+        rows_in_group.sort(key=lambda row: row["row_number"])
+        groups.append({"original_no": household_no, "rows": rows_in_group})
+        warnings.append(
+            "户号 %s 有 %d 行重复，已转入重号核定"
+            % (household_no, len(rows_in_group)))
+
+    if not parsed_rows and not groups:
         raise ImportError_("CSV 中没有数据行")
 
     column_definitions = [{"id": qid, "title": next(
@@ -193,7 +236,7 @@ def parse(raw_csv, raw_json, household_column=None):
             raise ImportError_(str(error))
         warnings.extend(build_warnings)
 
-    return definition, warnings, parsed_rows, household_position, headers
+    return definition, warnings, parsed_rows, groups, household_position, headers
 
 
 def to_import_answers(definition, rows):
@@ -203,3 +246,10 @@ def to_import_answers(definition, rows):
         _, answers = engine.import_row(definition, row["answers"])
         stored[row["household_no"]] = answers
     return stored
+
+
+def to_row_answers(definition, rows):
+    """``{(row_number, household_no): {(prefix, qid): value}}`` for any rows."""
+    return {(row["row_number"], row["household_no"]):
+            engine.import_row(definition, row["answers"])[1]
+            for row in rows}

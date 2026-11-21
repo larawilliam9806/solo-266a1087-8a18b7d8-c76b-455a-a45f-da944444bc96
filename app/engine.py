@@ -207,6 +207,11 @@ def _jump_table(data):
     return None
 
 
+def is_complete_questionnaire(data):
+    """True when the JSON carries a full question list, not just jump rules."""
+    return _extract_full_questions(data) is not None
+
+
 def json_columns(data):
     """Question columns implied by the JSON, or ``None``.
 

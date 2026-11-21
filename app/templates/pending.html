@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}重号核定 {{ group.original_no }} · 果园设备调查{% endblock %}
+{% block content %}
+<section class="card">
+  <p class="muted"><a href="{{ url_for('batch', batch_id=batch.id) }}">← 返回 {{ batch.name }}</a></p>
+  <div class="row">
+    <div>
+      <h1>重号核定：{{ group.original_no }}</h1>
+      <p class="muted">
+        共 {{ group.rows|length }} 行来自 CSV。
+        {% if group.status == "accepted" %}
+          该组已于 {{ group.decided_at }} 核定生效。
+        {% else %}
+          待核行暂时不进入逐户改答和分析 CSV。
+        {% endif %}
+      </p>
+    </div>
+    <div class="actions">
+      <span class="badge {{ 'ok' if group.status == 'accepted' else 'missing' }}">
+        {{ "已核定" if group.status == "accepted" else "待核" }}
+      </span>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>逐行核定</h2>
+  <p class="muted">每行标记「保留」并填写核实户号（可沿用原号 {{ group.original_no }}），或标记「弃用」。
+    整组决定齐全后点「整组生效」；保留行的户号须互不相同，且未被本批正式答卷或其他待核组的原号占用。</p>
+  {% if used_numbers %}
+    <p class="muted">当前已占用 / 仍被其他待核组保留的户号：
+      {% for number in used_numbers %}<span class="chip">{{ number }}</span>{% endfor %}
+    </p>
+  {% endif %}
+
+  {% if group.status == "pending" %}
+  <form method="post"
+        action="{{ url_for('decide_pending_group', batch_id=batch.id, group_id=group.id) }}">
+    <table>
+      <thead>
+        <tr>
+          <th>CSV 行</th><th>清洁后路径</th><th>有效答案</th><th>决定</th><th>核实户号</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in group.rows %}
+          <tr>
+            <td class="strong">第 {{ row.row_number }} 行</td>
+            <td class="route">
+              {{ row.route|join(" → ") }}
+              {% if row.missing %}
+                <div><span class="badge missing">漏答 {{ row.missing.qid }}</span></div>
+              {% endif %}
+            </td>
+            <td>
+              <dl class="answers">
+                {% for qid, value in row.answer_list %}
+                  <dt>{{ qid }}</dt><dd>{{ value }}</dd>
+                {% else %}
+                  <span class="muted">无有效答案</span>
+                {% endfor %}
+              </dl>
+            </td>
+            <td>
+              <label class="option">
+                <input type="radio" name="row_{{ row.id }}_decision" value="keep"
+                       {% if row.decision != "discard" %}checked{% endif %}> 保留
+              </label>
+              <label class="option">
+                <input type="radio" name="row_{{ row.id }}_decision" value="discard"
+                       {% if row.decision == "discard" %}checked{% endif %}> 弃用
+              </label>
+            </td>
+            <td>
+              <input type="text" name="row_{{ row.id }}_no"
+                     value="{{ row.verified_no or '' }}"
+                     placeholder="{{ group.original_no }}">
+            </td>
+          </tr>
+          <tr>
+            <td></td>
+            <td colspan="4">
+              <a href="{{ url_for('pending_row', batch_id=batch.id, group_id=group.id, row_id=row.id) }}">
+                查看第 {{ row.row_number }} 行逐题详情
+              </a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="actions" style="margin-top: 1rem">
+      <button type="submit" name="action" value="save">暂存决定</button>
+      <button type="submit" name="action" value="accept">整组生效</button>
+    </div>
+  </form>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>CSV 行</th><th>清洁后路径</th><th>去向</th></tr>
+    </thead>
+    <tbody>
+      {% for row in group.rows %}
+        <tr>
+          <td class="strong">第 {{ row.row_number }} 行</td>
+          <td class="route">{{ row.route|join(" → ") }}</td>
+          <td>
+            {% if row.decision == "keep" %}
+              已加入正式答卷 · 户号
+              {% if row.household_id %}
+                <a href="{{ url_for('household', batch_id=batch.id, household_id=row.household_id) }}">{{ row.verified_no }}</a>
+              {% else %}
+                {{ row.verified_no }}
+              {% endif %}
+            {% else %}
+              已弃用
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

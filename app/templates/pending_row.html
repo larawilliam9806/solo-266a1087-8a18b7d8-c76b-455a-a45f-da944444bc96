@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}待核行 {{ row.row_number }} · {{ group.original_no }}{% endblock %}
+{% block content %}
+<section class="card">
+  <p class="muted">
+    <a href="{{ url_for('pending_group', batch_id=batch.id, group_id=group.id) }}">← 返回重号核定</a>
+    · <a href="{{ url_for('batch', batch_id=batch.id) }}">{{ batch.name }}</a>
+  </p>
+  <h1>CSV 第 {{ row.row_number }} 行 · 原户号 {{ group.original_no }}</h1>
+  <p class="muted">以下答案已按原跳题规则清洗：只保留走到的题目，第一条空答之后的值不计入。</p>
+  {% if missing %}
+    <div class="flash warning">首个漏答题：<strong>{{ missing.qid }} {{ missing.title }}</strong></div>
+  {% else %}
+    <div class="flash success">该行按跳题规则已答完。</div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <table>
+    <thead><tr><th>题目</th><th>路径</th><th>有效答案</th></tr></thead>
+    <tbody>
+      {% for step in steps %}
+        <tr class="{{ 'unanswered' if not step.answered else '' }}">
+          <td><span class="qid">{{ step.qid }}</span> {{ step.title }}</td>
+          <td class="route">{{ step.prefix|join(" → ") or "起题" }}</td>
+          <td>
+            {% if step.answered %}
+              {{ step.value }}
+              {% if step.invalid %}<span class="warn">（不在选项中）</span>{% endif %}
+            {% else %}
+              <span class="muted">未答</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

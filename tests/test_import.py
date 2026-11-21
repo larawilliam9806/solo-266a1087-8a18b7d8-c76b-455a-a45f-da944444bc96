@@ -31,7 +31,7 @@ def parse(csv_text=CSV_TEXT, jumps=JUMPS, encoding="utf-8"):
 
 
 def test_import_uses_only_reached_answers():
-    definition, warnings, rows, _, _ = parse()
+    definition, warnings, rows, groups, _, _ = parse()
     stored = importer.to_import_answers(definition, rows)
     assert [q["id"] for q in definition] == ["Q1", "Q2", "Q3", "Q4", "Q5"]
     h2 = stored["H2"]
@@ -45,40 +45,40 @@ def test_import_uses_only_reached_answers():
 
 
 def test_import_stops_at_blank():
-    definition, _, rows, _, _ = parse()
+    definition, _, rows, groups, _, _ = parse()
     stored = importer.to_import_answers(definition, rows)
     assert stored["H3"] == {((), "Q1"): "自购"}  # Q2 blank stops the walk
 
 
 def test_import_tolerates_bom_and_gbk():
-    definition, _, rows, _, _ = parse(encoding="gb18030")
+    definition, _, rows, groups, _, _ = parse(encoding="gb18030")
     assert [row["household_no"] for row in rows] == ["H1", "H2", "H3"]
     assert rows[0]["answers"]["Q1"] == "自购"
 
 
 def test_household_header_is_found_by_name():
     csv_text = "调查员,户号,Q1 设备来源\n张三,H9,租赁\n"
-    definition, _, rows, _, _ = parse(csv_text)
+    definition, _, rows, groups, _, _ = parse(csv_text)
     assert rows[0]["household_no"] == "H9"
 
 
 def test_duplicate_households_keep_first():
     csv_text = "户号,Q1 设备来源\nH1,自购\nH1,租赁\n"
-    definition, warnings, rows, _, _ = parse(csv_text)
+    definition, warnings, rows, groups, _, _ = parse(csv_text)
     assert len(rows) == 1
     assert any("重复" in warning for warning in warnings)
 
 
 def test_missing_column_is_reported():
     csv_text = "户号,Q1 设备来源,Q2 自购设备类型\nH1,自购,喷药机\n"
-    definition, warnings, rows, _, _ = parse(csv_text)
+    definition, warnings, rows, groups, _, _ = parse(csv_text)
     assert any("Q4" in warning for warning in warnings)
 
 
 def test_unknown_option_is_kept_but_flagged():
     jumps = {"order": ["Q1"], "types": {"Q1": "single"},
              "options": {"Q1": ["自购", "租赁"]}, "jumps": {}}
-    definition, _, rows, _, _ = parse("户号,Q1 设备来源\nH1,丢弃\n", jumps)
+    definition, _, rows, groups, _, _ = parse("户号,Q1 设备来源\nH1,丢弃\n", jumps)
     # The value cannot be routed, so it stays on Q1 for the editor to fix.
     stored = importer.to_import_answers(definition, rows)
     assert stored["H1"] == {((), "Q1"): "丢弃"}
@@ -101,7 +101,46 @@ def test_rule_list_shape():
 def test_bare_jump_table_without_order_uses_csv_columns():
     jumps = {"Q1": {"租赁": "Q3"}}
     csv_text = "户号,Q1 来源,Q2 型号,Q3 费用\nH1,租赁,喷药机,100\n"
-    definition, _, rows, _, _ = parse(csv_text, jumps)
+    definition, _, rows, groups, _, _ = parse(csv_text, jumps)
     assert [q["id"] for q in definition] == ["Q1", "Q2", "Q3"]
     stored = importer.to_import_answers(definition, rows)["H1"]
     assert stored == {((), "Q1"): "租赁", (("Q1",), "Q3"): "100"}
+
+
+FULL_JSON = [
+    {"id": "Q1", "title": "设备来源", "type": "single",
+     "options": ["自购", "租赁"], "jumps": {"租赁": "Q3"}},
+    {"id": "Q2", "title": "自购台数", "type": "number"},
+    {"id": "Q3", "title": "年费用", "type": "number"},
+]
+
+DUP_CSV = """户号,Q1 设备来源,Q2 自购台数,Q3 年费用
+H1,自购,2,100
+H2,自购,3,200
+H1,租赁,,800
+"""
+
+
+def test_full_questionnaire_keeps_duplicate_rows_as_group():
+    definition, warnings, rows, groups, _, _ = parse(DUP_CSV, FULL_JSON)
+    assert [row["household_no"] for row in rows] == ["H2"]
+    assert [group["original_no"] for group in groups] == ["H1"]
+    assert [row["row_number"] for row in groups[0]["rows"]] == [1, 3]
+    assert any("重号核定" in warning for warning in warnings)
+    # Cleaned answers: the rental row skips Q2 and stops at blank Q3? No —
+    # Q1=租赁 jumps to Q3, so only Q1 and Q3 are kept.
+    answers = importer.to_row_answers(definition, groups[0]["rows"])
+    assert answers[(1, "H1")] == {((), "Q1"): "自购",
+                                  (("Q1",), "Q2"): "2",
+                                  (("Q1", "Q2"), "Q3"): "100"}
+    assert answers[(3, "H1")] == {((), "Q1"): "租赁",
+                                  (("Q1",), "Q3"): "800"}
+
+
+def test_bare_jump_table_still_drops_duplicates():
+    jumps = {"Q1": {"租赁": "Q3"}}
+    csv_text = "户号,Q1 来源,Q2 型号,Q3 费用\nH1,租赁,喷药机,100\nH1,自购,喷药机,200\n"
+    definition, warnings, rows, groups, _, _ = parse(csv_text, jumps)
+    assert groups == []
+    assert len(rows) == 1
+    assert any("重复" in warning for warning in warnings)
